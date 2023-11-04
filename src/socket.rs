@@ -1,6 +1,5 @@
 use std::io::Result;
 use std::net::SocketAddr;
-use std::time::Duration;
 use socket2::{SockAddr, Socket, Domain, Type, Protocol};
 
 pub struct IcmpSocket(Socket);
@@ -21,7 +20,6 @@ impl IcmpSocket {
             ),
         }.ok()?;
         socket.bind(&local.into()).ok()?;
-        let _ = socket.set_read_timeout(Some(Duration::new(2, 0)));
         Some(IcmpSocket(socket))
     }
 

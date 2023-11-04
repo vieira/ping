@@ -4,6 +4,7 @@ mod socket;
 
 use std::{process, thread, env};
 use std::net::SocketAddr;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use messages::{ICMP_ECHO_REQUEST, ICMP6_ECHO_REQUEST};
 use messages::ip::{Ipv4Header, Ipv6Header};
@@ -13,6 +14,8 @@ use messages::echo::{Echo, Data};
 fn main() {
     let pid = Box::leak(Box::new(process::id() as u16));
     let epoch = Box::leak(Box::new(Instant::now()));
+    let (tx, rx) = mpsc::channel();
+    let tx = Box::leak(Box::new(tx.clone()));
 
     let Some(domain) = env::args().nth(1)
     else {
@@ -49,13 +52,11 @@ fn main() {
         core::mem::size_of::<Data>()
     );
 
+
     thread::spawn(|| {
+        let mut last_seq_no = 0;
         loop {
             let Ok((buffer, src_addr)) = socket.recv_from() else {
-                eprintln!(
-                    "Request timeout ({}s into execution)",
-                    epoch.elapsed().as_secs(),
-                );
                 continue
             };
 
@@ -74,16 +75,15 @@ fn main() {
                 },
             };
 
-            if !icmp.is_ours(*pid) { continue }
-
             if icmp.is_err() {
                 eprintln!(
-                    "Destination unreachable: src={} code={} ({}s into execution)",
+                    "Destination unreachable: src={} code={}",
                     src_addr.ip(),
                     icmp.code,
-                    epoch.elapsed().as_secs(),
                 );
             }
+
+            if !icmp.is_ours(*pid) { continue }
 
             let now = epoch.elapsed().as_micros() as u64;
             let timestamp = u64::from_be_bytes(icmp.body.data.timestamp);
@@ -91,6 +91,12 @@ fn main() {
                 Some(ttl) => format!(" ttl={}", ttl),
                 None => String::new(),
             };
+
+            if last_seq_no < icmp.body.seq_no + 1 {
+                last_seq_no = icmp.body.seq_no;
+                tx.send(icmp.body.seq_no).unwrap();
+            }
+
             println!(
                 "{} bytes from {}: icmp_seq={}{} time={} ms",
                 icmp.size(),
@@ -105,7 +111,11 @@ fn main() {
     for seq_no in 0.. {
         let payload = req.timestamp(&epoch).checksum().as_bytes();
         let _ = socket.send_to(payload, &dest.into());
-        thread::sleep(Duration::new(1, 0));
         req.body.seq_no = (seq_no % u16::MAX) + 1;
+        thread::sleep(Duration::new(1, 0));
+        let Some(_) = rx.try_recv().ok() else {
+            eprintln!("Request timeout for icmp_seq {seq_no}");
+            continue;
+        };
     }
 }
